@@ -7,6 +7,25 @@ import sys
 BASE = Path(__file__).resolve().parent
 DM_JSON = BASE / "dm.json"
 
+
+def fmt_hhmm(dt: dict) -> str:
+    """EFA dateTime/realDateTime -> 'HH:MM' """
+    if not isinstance(dt, dict):
+        return "—"
+    h = dt.get("hour")
+    m = dt.get("minute")
+    if h is None or m is None:
+        return "—"
+    return f"{int(h):02d}:{int(m):02d}"
+
+
+def to_int(x, default=None):
+    try:
+        return int(str(x).strip())
+    except Exception:
+        return default
+
+
 # --- curl-Befehl ---
 curl_cmd = [
     "curl", "-sL",
@@ -32,42 +51,48 @@ if result.returncode != 0 or not DM_JSON.exists():
 with DM_JSON.open("r", encoding="utf-8") as f:
     data = json.load(f)
 
-# --- departureList holen ---
-if "departureList" not in data:
+departures = data.get("departureList")
+if not isinstance(departures, list):
     print("❌ Keine departureList im JSON gefunden")
     sys.exit(1)
 
-departures = data["departureList"]
-
-# --- nächste 701 an Bstg 4 suchen ---
+# --- nächste 701 an Bstg 4 suchen (kleinstes countdown) ---
 best = None
 
 for e in departures:
-    line = e.get("servingLine", {}).get("number")
-    bstg = e.get("platformName") or e.get("platform")
+    serving = e.get("servingLine", {}) if isinstance(e.get("servingLine"), dict) else {}
+    line = str(serving.get("number", ""))
+    bstg = str((e.get("platformName") or e.get("platform") or "")).strip()
 
     if line != "701":
         continue
     if bstg != "4":
         continue
 
-    try:
-        countdown = int(e.get("countdown"))
-    except (TypeError, ValueError):
+    countdown = to_int(e.get("countdown"))
+    if countdown is None:
         continue
 
     if best is None or countdown < best[0]:
         best = (countdown, e)
 
-# --- Ausgabe ---
 if best is None:
     print("Keine 701 an Bstg 4 gefunden.")
-else:
-    countdown, e = best
-    direction = e["servingLine"].get("direction", "")
-    delay = e["servingLine"].get("delay", "0")
+    sys.exit(0)
 
-    print(
-        f"Nächste 701 (Bstg 4): "
-        f"in {countdown} min → {direction} (+{delay})"
-    )
+countdown, e = best
+serving = e.get("servingLine", {})
+direction = serving.get("direction", "")
+
+planned = fmt_hhmm(e.get("dateTime"))
+real = fmt_hhmm(e.get("realDateTime"))
+
+delay = to_int(serving.get("delay"), 0)
+
+print(
+    f"Nächste 701 (Bstg 4) → {direction}\n"
+    f"Geplant:     {planned}\n"
+    f"Tatsächlich: {real}\n"
+    f"In:          {countdown} min\n"
+    f"Verspätung:  +{delay} min"
+)
