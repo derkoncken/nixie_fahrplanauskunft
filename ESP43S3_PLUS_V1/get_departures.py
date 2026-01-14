@@ -1,4 +1,4 @@
-# print_tt.py — VRR/EFA Direct Monitoring (JSON) -> nächste Abfahrt (STREAMING, robust)
+# get_departures.py  — VRR/EFA Direct Monitoring (JSON) -> nächste Abfahrt (STREAMING, robust)
 import network
 import time
 import json
@@ -10,7 +10,6 @@ URL_HOST = "efa.vrr.de"
 URL_PATH = "/standard/XML_DM_REQUEST"
 
 REQUEST_TIMEOUT_S = 20
-
 CHUNK_SIZE = 2048
 
 # SSL read() "None"-Spins
@@ -26,8 +25,16 @@ WIFI_CONNECT_TIMEOUT_S = 25
 WIFI_CONNECT_RETRIES = 4
 WIFI_RESET_SLEEP_MS = 500
 
-# Globales WLAN-Objekt (wichtig: nicht ständig neu erstellen)
+# DNS / Resolve Cache
+DNS_FALLBACK_PUBLIC = "8.8.8.8"
+RESOLVE_TTL_S = 6 * 60 * 60  # 6h
+
+# Globales WLAN-Objekt
 _WLAN = network.WLAN(network.STA_IF)
+
+# Host-IP Cache
+_EFA_IP = None
+_EFA_IP_TS = 0
 
 
 def to_int(x, default=None):
@@ -51,7 +58,6 @@ def fmt_hhmm(dt) -> str:
 
 
 def _wifi_status_name(code: int) -> str:
-    # Falls vorhanden, MicroPython-Constants nutzen
     m = {
         getattr(network, "STAT_IDLE", 0): "IDLE",
         getattr(network, "STAT_CONNECTING", 1): "CONNECTING",
@@ -76,23 +82,39 @@ def _wifi_hard_reset():
     _WLAN.active(True)
     time.sleep_ms(WIFI_RESET_SLEEP_MS)
 
-    # Power Save aus (stabilisiert Verbindungen/SSL deutlich)
+    # Power Save aus (falls unterstützt)
     try:
         _WLAN.config(pm=0xa11140)
     except Exception:
         pass
 
-    # kurz warten, bis Interface “bereit” ist
     time.sleep_ms(200)
 
 
+def ensure_dns(wlan, fallback_public=DNS_FALLBACK_PUBLIC, prefer_gw=True):
+    """
+    Wenn DHCP keinen DNS liefert (dns='0.0.0.0' / ''), setzen wir einen:
+    bevorzugt Gateway als DNS (lokal meist stabil), sonst Public DNS.
+    """
+    try:
+        ip, mask, gw, dns = wlan.ifconfig()
+    except Exception:
+        return None
+
+    if not dns or dns == "0.0.0.0":
+        new_dns = gw if (prefer_gw and gw and gw != "0.0.0.0") else fallback_public
+        try:
+            wlan.ifconfig((ip, mask, gw, new_dns))
+        except Exception:
+            pass
+
+    try:
+        return wlan.ifconfig()[3]
+    except Exception:
+        return None
+
+
 def wifi_connect(ssid: str, password: str, timeout_s: int = WIFI_CONNECT_TIMEOUT_S) -> None:
-    """
-    Verbindet WLAN robust:
-    - benutzt globales STA_IF (nicht ständig neu anlegen)
-    - disabled PM (falls unterstützt)
-    - retries + hard reset bei internen Zuständen
-    """
     _WLAN.active(True)
     try:
         _WLAN.config(pm=0xa11140)
@@ -100,12 +122,12 @@ def wifi_connect(ssid: str, password: str, timeout_s: int = WIFI_CONNECT_TIMEOUT
         pass
 
     if _WLAN.isconnected():
+        ensure_dns(_WLAN)
         return
 
     last_status = None
 
     for _ in range(WIFI_CONNECT_RETRIES):
-        # sauberer Start
         try:
             _WLAN.disconnect()
         except Exception:
@@ -115,20 +137,19 @@ def wifi_connect(ssid: str, password: str, timeout_s: int = WIFI_CONNECT_TIMEOUT
         try:
             _WLAN.connect(ssid, password)
         except OSError:
-            # wenn connect() selbst schon abkackt: reset und retry
             _wifi_hard_reset()
             continue
 
         t0 = time.ticks_ms()
         while True:
             if _WLAN.isconnected():
+                ensure_dns(_WLAN)
                 return
 
             st = _WLAN.status()
             last_status = st
 
-            # harte Fehlerzustände -> sofort reset/retry
-            if st in (-3, -2, -1):  # WRONG_PASSWORD / NO_AP_FOUND / CONNECT_FAIL
+            if st in (-3, -2, -1):
                 break
 
             if time.ticks_diff(time.ticks_ms(), t0) > timeout_s * 1000:
@@ -136,17 +157,92 @@ def wifi_connect(ssid: str, password: str, timeout_s: int = WIFI_CONNECT_TIMEOUT
 
             time.sleep(0.25)
 
-        # Wenn wir hier sind: kein Erfolg -> reset und retry
         _wifi_hard_reset()
 
     raise RuntimeError("WLAN Verbindung Timeout (status={})".format(_wifi_status_name(last_status)))
 
 
+def wifi_internet_ok():
+    """
+    Minimaler Check: DNS-Auflösung muss funktionieren.
+    (genau der Pfad, der bei dir mit -202 knallt)
+    """
+    try:
+        usocket.getaddrinfo("example.com", 80, usocket.AF_INET, usocket.SOCK_STREAM)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_wifi(ssid: str, password: str, tries: int = 3) -> bool:
+    """
+    Reconnect + DNS prüfen, ohne Endlosschleife.
+    """
+    for _ in range(tries):
+        try:
+            wifi_connect(ssid, password)
+            if wifi_internet_ok():
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def _resolve_host_ipv4(host: str, port: int):
+    # IPv4 erzwingen
+    infos = usocket.getaddrinfo(host, port, usocket.AF_INET, usocket.SOCK_STREAM)
+    # infos[0][-1] ist (ip, port)
+    return infos[0][-1][0]
+
+
+def _get_cached_efa_ip():
+    global _EFA_IP, _EFA_IP_TS
+    now = time.time()
+    if _EFA_IP and (now - _EFA_IP_TS) < RESOLVE_TTL_S:
+        return _EFA_IP
+    # Cache abgelaufen
+    _EFA_IP = None
+    return None
+
+
+def _set_cached_efa_ip(ip: str):
+    global _EFA_IP, _EFA_IP_TS
+    _EFA_IP = ip
+    _EFA_IP_TS = time.time()
+
+
 def _open_https():
-    addr = usocket.getaddrinfo(URL_HOST, 443)[0][-1]
-    s = usocket.socket()
+    """
+    DNS/Resolve robust:
+    - IPv4-only resolve
+    - IP Cache
+    - bei -202: Cache leeren und nochmal versuchen (nach WLAN/DNS repair)
+    """
+    ip = _get_cached_efa_ip()
+    if not ip:
+        try:
+            ip = _resolve_host_ipv4(URL_HOST, 443)
+            _set_cached_efa_ip(ip)
+        except OSError as e:
+            # DNS fail
+            if e.args and e.args[0] == -202:
+                # Versuch: DNS/WLAN reparieren -> nochmal resolve
+                try:
+                    ensure_dns(_WLAN)
+                except Exception:
+                    pass
+                ip = _resolve_host_ipv4(URL_HOST, 443)
+                _set_cached_efa_ip(ip)
+            else:
+                raise
+
+    addr = (ip, 443)
+    s = usocket.socket(usocket.AF_INET, usocket.SOCK_STREAM)
     s.settimeout(REQUEST_TIMEOUT_S)
     s.connect(addr)
+
+    # Wichtig: SNI bleibt Hostname, auch wenn wir zur IP connecten
     return ssl.wrap_socket(s, server_hostname=URL_HOST)
 
 
@@ -178,6 +274,7 @@ def _read_retry(sock, nbytes: int):
             return sock.read(nbytes)
         except OSError as e:
             code = e.args[0] if e.args else None
+            # -116 ETIMEDOUT / -11 EAGAIN (je nach Port)
             if code in (-116, -11) and retries > 0:
                 retries -= 1
                 time.sleep_ms(READ_RETRY_SLEEP_MS)
@@ -220,7 +317,7 @@ def _parse_status_and_headers(header: bytes):
         p = ln.find(b":")
         if p > 0:
             k = ln[:p].decode("latin-1", "ignore").strip().lower()
-            v = ln[p+1:].decode("latin-1", "ignore").strip()
+            v = ln[p + 1:].decode("latin-1", "ignore").strip()
             hmap[k] = v
     return status, hmap
 
@@ -413,7 +510,6 @@ def fetch_next(stop_id: str, limit: str, line_no: str, platform: str):
 
 def get_data(stop_id, limit, line_no, platform):
     """
-    WLAN wird NICHT hier gemacht.
     Rückgabe:
       None
       oder (countdown:int, direction:str, planned:str, real:str, delay:int)

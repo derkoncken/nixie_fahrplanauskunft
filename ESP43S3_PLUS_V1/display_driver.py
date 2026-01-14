@@ -4,13 +4,14 @@ import time
 import framebuf
 
 # GPIOs (XIAO ESP32S3)
-BUSY = 1   # D0
-RST  = 2   # D1
-DC   = 3   # D2
-CS   = 4   # D3
-SCK  = 7   # D8
-MOSI = 9   # D10
-
+BUSY = 1   # D0 LILA
+RST  = 2   # D1 WEIß
+DC   = 3   # D2 GRÜN
+CS   = 4   # D3 ORANGE
+SCK  = 7   # D8 GELB
+MOSI = 9   # D10 BLAU
+#            VCC GRAU
+#            GND BRAUN
 spi = SPI(2, baudrate=2_000_000, polarity=0, phase=0,
           sck=Pin(SCK), mosi=Pin(MOSI), miso=None)
 
@@ -102,14 +103,15 @@ class EPD29V2:
 
 
 def rotated_pixel_90(fb, w, h):
-    # (x,y) im Querformat -> (w-1-y, x) im echten Buffer
+    # (x,y) im Querformat -> (y, h-1-x) im echten Buffer
     def p(x, y, c=None):
-        xx = w - 1 - y
-        yy = x
+        xx = y
+        yy = h - 1 - x
         if c is None:
             return fb.pixel(xx, yy)
         fb.pixel(xx, yy, c)
     return p
+
 
 
 def print_text(fb, pix, text, x, y, size=2, bold=False, color=0):
