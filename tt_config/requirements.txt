@@ -1,0 +1,42 @@
+bitarray==3.8.0
+bitstring==4.3.1
+contourpy @ file:///home/conda/feedstock_root/build_artifacts/contourpy_1731428322366/work
+cycler @ file:///home/conda/feedstock_root/build_artifacts/cycler_1733332471406/work
+ecdsa==0.19.1
+esptool==4.7.0
+et_xmlfile==2.0.0
+fonttools @ file:///home/conda/feedstock_root/build_artifacts/fonttools_1735335805155/work
+iai-gxipy==2.0.2105.9261
+intelhex==2.3.0
+Jinja2==3.1.5
+kiwisolver @ file:///home/conda/feedstock_root/build_artifacts/kiwisolver_1725459213453/work
+MarkupSafe==3.0.2
+matplotlib==3.10.0
+munkres==1.1.4
+numpy==2.2.2
+opencv-python==4.10.0
+opencv-python-headless==4.10.0
+openpyxl==3.1.5
+packaging @ file:///home/conda/feedstock_root/build_artifacts/packaging_1733203243479/work
+pandas==2.2.3
+pillow @ file:///home/conda/feedstock_root/build_artifacts/pillow_1735929693232/work
+ply @ file:///home/conda/feedstock_root/build_artifacts/ply_1733239724146/work
+pyparsing @ file:///home/conda/feedstock_root/build_artifacts/pyparsing_1735698276679/work
+PyQt5==5.15.9
+PyQt5-sip==12.12.2
+PySide6==6.8.1
+python-dateutil==2.9.0.post0
+pytz==2025.1
+qt-material==2.14
+reedsolo==1.7.0
+scipy @ file:///home/conda/feedstock_root/build_artifacts/scipy-split_1736008959388/work/dist/scipy-1.15.0-cp310-cp310-linux_x86_64.whl#sha256=da5c0c616dc6b35667cd933c7c1a666aa0dc1eb78a8d3c2be3017a151ba854f7
+seaborn==0.13.2
+shiboken6==6.8.1
+sip @ file:///home/conda/feedstock_root/build_artifacts/sip_1697300428978/work
+six @ file:///home/conda/feedstock_root/build_artifacts/six_1733380938961/work
+toml @ file:///home/conda/feedstock_root/build_artifacts/toml_1734091811753/work
+tomli @ file:///home/conda/feedstock_root/build_artifacts/tomli_1733256695513/work
+tornado @ file:///home/conda/feedstock_root/build_artifacts/tornado_1732615898999/work
+tzdata==2025.1
+unicodedata2 @ file:///home/conda/feedstock_root/build_artifacts/unicodedata2_1729704533769/work
+UrRtde @ file:///home/derk/Documents/bagmixingV2/additional_stuff/rtde-2.7.2-release.zip#sha256=8ff7552d7cf3e33de37cd1f41513d7880e0fc58cead0a35034f8f7849d50ce44

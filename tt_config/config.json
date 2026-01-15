@@ -1,0 +1,12 @@
+{
+  "haltestelle_1": "",
+  "bahnsteig_1": 1,
+  "abfahrten_1": 1,
+  "haltestelle_2": "",
+  "bahnsteig_2": 1,
+  "abfahrten_2": 1,
+  "alarm_abfahrt": 0,
+  "alarm_minuten": 1,
+  "wlan_name": "12345",
+  "wlan_ssid": "222"
+}
