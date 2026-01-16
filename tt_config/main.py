@@ -85,11 +85,11 @@ class MainWindow(QMainWindow):
     # -------- Upload/Download Flow --------
     def on_upload_clicked(self):
         save_ui_to_json(self.ui, "config.json")
-        # upload_json_to_esp32("config.json")
-        # self.reset_esp32()
+        upload_json_to_esp32("config.json")
+        self.reset_esp32()
 
     def on_download_clicked(self):
-        # download_json_from_esp32("config.json", "config.json")
+        download_json_from_esp32("config.json", "config.json")
         load_ui_from_json(self.ui, "config.json")
 
     def reset_esp32(self):

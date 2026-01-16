@@ -322,7 +322,7 @@
       </rect>
      </property>
     </widget>
-    <widget class="QLineEdit" name="wlan_ssid">
+    <widget class="QLineEdit" name="wlan_password">
      <property name="geometry">
       <rect>
        <x>190</x>

@@ -12,18 +12,31 @@ UI-Objektnamen (aus deinem Ui_Dialog):
 - tbl_departures (QTableWidget, 4 Spalten)
 - btn_apply (QPushButton)
 - btn_close (QPushButton)
+
+Tabellen-Dynamik (nach Ermessen):
+- Stops: 1 Spalte, immer Stretch auf volle Breite
+- Departures: Zeit/Linie/Bahnsteig ResizeToContents, Richtung Stretch (füllt Rest)
+- horizontales Scrollen aus, Tabellen passen sich der Dialogbreite an
+- Zeilenhöhe kompakt, AlternatingRowColors, Sortierung/Selektionshandling robust
+- Abfahrten: Duplikate raus (Linie+Richtung+Bahnsteig), dann sortiert nach:
+    Linie → Richtung → Bahnsteig (natürlich für Zahlen in Linien, z.B. 2 vor 10)
 """
 
 import json
 import logging
 import os
+import re
 import time
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlencode
 
 import requests
-from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal
-from PyQt5.QtWidgets import QAbstractItemView, QTableWidgetItem
+from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal, Qt
+from PyQt5.QtWidgets import (
+    QAbstractItemView,
+    QHeaderView,
+    QTableWidgetItem,
+)
 
 
 EFA_BASE = "https://efa.vrr.de/standard"
@@ -69,9 +82,7 @@ def _safe_snippet(text: str, n: int = 1200) -> str:
 
 
 def _post_form_utf8(url: str, form: dict, timeout_s: int = 20) -> requests.Response:
-    """
-    x-www-form-urlencoded als UTF-8 Bytes senden -> Umlaute sicher korrekt.
-    """
+    """x-www-form-urlencoded als UTF-8 Bytes senden -> Umlaute sicher korrekt."""
     body = urlencode(form, encoding="utf-8").encode("utf-8")
     headers = {
         "User-Agent": "tt_config",
@@ -84,28 +95,22 @@ def _post_form_utf8(url: str, form: dict, timeout_s: int = 20) -> requests.Respo
 def _decode_response_json(resp: requests.Response) -> dict:
     """
     VRR liefert oft content-type text/html, manchmal ohne charset.
-    Robust dekodieren:
-      - default utf-8
-      - fallback latin-1 (nur damit wir Fehlertexte/log sehen können)
+    Robust dekodieren: utf-8 default, fallback latin-1.
     """
     raw = resp.content or b""
-
     if not resp.encoding:
         resp.encoding = "utf-8"
 
-    # Versuch 1: resp.text (mit resp.encoding)
     try:
         return json.loads(resp.text)
     except Exception:
         pass
 
-    # Versuch 2: raw utf-8
     try:
         return json.loads(raw.decode("utf-8"))
     except Exception:
         pass
 
-    # Versuch 3: latin-1 replace
     return json.loads(raw.decode("latin-1", errors="replace"))
 
 
@@ -123,9 +128,7 @@ def fmt_hhmm(dt) -> str:
 
 
 def _extract_points(payload: dict) -> list:
-    """
-    stopFinder.points ist im VRR JSON stabil vorhanden (wie in deinem Log).
-    """
+    """stopFinder.points ist im VRR JSON stabil vorhanden."""
     if not isinstance(payload, dict):
         return []
     sf = payload.get("stopFinder")
@@ -136,9 +139,7 @@ def _extract_points(payload: dict) -> list:
 
 
 def _extract_departure_list(payload: dict) -> list:
-    """
-    departureList kann verschachtelt sein -> rekursive Suche.
-    """
+    """departureList kann verschachtelt sein -> rekursive Suche."""
     def find_key(obj, key: str):
         if isinstance(obj, dict):
             if key in obj:
@@ -156,6 +157,12 @@ def _extract_departure_list(payload: dict) -> list:
 
     dep = find_key(payload, "departureList")
     return dep if isinstance(dep, list) else []
+
+
+def _nat_key(s: str):
+    """Natürlicher Sort-Key: 'U11' < 'U2'? -> wird zu ['u', 11] etc."""
+    s = (s or "").strip()
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
 
 # ---------------- Workers ----------------
@@ -178,7 +185,6 @@ class StopSearchWorker(QObject):
                 "type_sf": "any",
                 "name_sf": self.query,
                 "locationServerActive": 1,
-                # serverseitig etwas mehr holen, dann lokal sortieren/limitieren:
                 "anyMaxSizeHitList": max(30, self.limit * 4),
             }
 
@@ -188,22 +194,21 @@ class StopSearchWorker(QObject):
             r = _post_form_utf8(URL_STOPFINDER, form, timeout_s=self.timeout_s)
             LOG.info("[%s] StopFinder HTTP %s %s", req_id, r.status_code, r.reason)
             LOG.debug("[%s] StopFinder headers=%s", req_id, dict(r.headers))
-            LOG.debug("[%s] StopFinder raw-snippet=%s", req_id, _safe_snippet((r.content or b"")[:1200].decode("latin-1", "replace")))
-
+            LOG.debug(
+                "[%s] StopFinder raw-snippet=%s",
+                req_id,
+                _safe_snippet((r.content or b"")[:1200].decode("latin-1", "replace")),
+            )
             r.raise_for_status()
 
             payload = _decode_response_json(r)
             points = _extract_points(payload)
             LOG.info("[%s] StopFinder points=%d", req_id, len(points))
 
-            # WICHTIG:
-            # In VRR JSON ist "anyType":"stop" das relevante Feld.
-            # Der eigentliche stop_id steckt meistens in p["stateless"] ODER p["ref"]["id"].
             stops = []
             for p in points:
                 if not isinstance(p, dict):
                     continue
-
                 if str(p.get("anyType", "")).lower() != "stop":
                     continue
 
@@ -211,27 +216,19 @@ class StopSearchWorker(QObject):
                 if not name:
                     continue
 
-                # stop_id: bevorzugt stateless (bei stops ist das meist die richtige EFA-ID)
                 stop_id = str(p.get("stateless") or "").strip()
-
-                # fallback: ref.id
                 if not stop_id:
                     ref = p.get("ref") if isinstance(p.get("ref"), dict) else {}
                     stop_id = str(ref.get("id") or "").strip()
-
                 if not stop_id:
                     continue
 
                 best = str(p.get("best") or "0") == "1"
                 quality = int(p.get("quality") or 0)
-
-                # Du willst in der Tabelle nur Name -> intern speichern wir id + meta
                 stops.append({"id": stop_id, "name": name, "best": best, "quality": quality})
 
-            # Sortierung: best -> quality -> name
             stops.sort(key=lambda x: (0 if x["best"] else 1, -x["quality"], x["name"].lower()))
 
-            # Dedupe nach id
             seen = set()
             out = []
             for s in stops:
@@ -279,8 +276,11 @@ class DeparturesWorker(QObject):
             r = _post_form_utf8(URL_DM, form, timeout_s=self.timeout_s)
             LOG.info("[%s] DM HTTP %s %s", req_id, r.status_code, r.reason)
             LOG.debug("[%s] DM headers=%s", req_id, dict(r.headers))
-            LOG.debug("[%s] DM raw-snippet=%s", req_id, _safe_snippet((r.content or b"")[:1200].decode("latin-1", "replace")))
-
+            LOG.debug(
+                "[%s] DM raw-snippet=%s",
+                req_id,
+                _safe_snippet((r.content or b"")[:1200].decode("latin-1", "replace")),
+            )
             r.raise_for_status()
 
             payload = _decode_response_json(r)
@@ -303,10 +303,32 @@ class DeparturesWorker(QObject):
 
                 deps.append({"time": time_str, "line": line, "direction": direction, "platform": platform})
 
-            # Wenn Server mehr liefert als gewünscht: hart begrenzen
-            deps = deps[: self.limit]
+            # Duplikate raus: gleiche Linie + Richtung + Bahnsteig (Zeit egal)
+            seen = set()
+            deduped = []
+            for d in deps:
+                key = (
+                    (d.get("line") or "").strip(),
+                    (d.get("direction") or "").strip(),
+                    (d.get("platform") or "").strip(),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(d)
 
-            self.finished.emit(deps)
+            # Sortierung: Linie → Richtung → Bahnsteig (natürlich bei Linie + Bahnsteig)
+            deduped.sort(
+                key=lambda x: (
+                    _nat_key(x.get("line", "")),
+                    (x.get("direction") or "").strip().lower(),
+                    _nat_key(x.get("platform", "")),
+                )
+            )
+
+            # hart begrenzen
+            deduped = deduped[: self.limit]
+            self.finished.emit(deduped)
 
         except Exception as e:
             LOG.exception("[%s] DM error", req_id)
@@ -316,8 +338,6 @@ class DeparturesWorker(QObject):
 # ---------------- Controller ----------------
 class StopFinderController(QObject):
     """
-    Bindet die Logik an deinen Dialog-UI.
-
     Output:
       selection_applied.emit({
         "stop_id": ...,
@@ -335,8 +355,8 @@ class StopFinderController(QObject):
         self._thread = None
         self._worker = None
 
-        self._selected_stop = None   # {"id","name"}
-        self._selected_dep = None    # {"time","line","direction","platform"}
+        self._selected_stop = None  # {"id","name"}
+        self._selected_dep = None   # {"time","line","direction","platform"}
 
         self.debounce = QTimer(self)
         self.debounce.setInterval(350)
@@ -345,22 +365,48 @@ class StopFinderController(QObject):
 
         self._setup_ui()
 
+    # ---------- UI setup / Table dynamics ----------
     def _setup_ui(self):
         # Stops table (1 Spalte)
         self.ui.tbl_stops.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.ui.tbl_stops.setSelectionMode(QAbstractItemView.SingleSelection)
         self.ui.tbl_stops.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.ui.tbl_stops.setSortingEnabled(False)
         self.ui.tbl_stops.setColumnCount(1)
         self.ui.tbl_stops.setHorizontalHeaderLabels(["Haltestelle"])
+        self.ui.tbl_stops.verticalHeader().setVisible(False)
+        self.ui.tbl_stops.setAlternatingRowColors(True)
+        self.ui.tbl_stops.setShowGrid(False)
+        self.ui.tbl_stops.setWordWrap(False)
+        self.ui.tbl_stops.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.ui.tbl_stops.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
 
         # Departures table (4 Spalten)
         self.ui.tbl_departures.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.ui.tbl_departures.setSelectionMode(QAbstractItemView.SingleSelection)
         self.ui.tbl_departures.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.ui.tbl_departures.setSortingEnabled(False)
         self.ui.tbl_departures.setColumnCount(4)
         self.ui.tbl_departures.setHorizontalHeaderLabels(["Zeit", "Linie", "Richtung", "Bahnsteig"])
+        self.ui.tbl_departures.verticalHeader().setVisible(False)
+        self.ui.tbl_departures.setAlternatingRowColors(True)
+        self.ui.tbl_departures.setShowGrid(False)
+        self.ui.tbl_departures.setWordWrap(False)
+        self.ui.tbl_departures.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # Spinboxes: deine Namen aus UI
+        # ⭐ Spalten-Layout (dynamisch, widget-breit)
+        hdr = self.ui.tbl_departures.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Zeit
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Linie
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Bahnsteig
+        hdr.setSectionResizeMode(2, QHeaderView.Stretch)           # Richtung füllt Rest
+        hdr.setStretchLastSection(False)
+
+        # angenehme Row-Höhe/Look
+        self.ui.tbl_stops.verticalHeader().setDefaultSectionSize(24)
+        self.ui.tbl_departures.verticalHeader().setDefaultSectionSize(24)
+
+        # Spinboxes
         self.ui.sp_limit_stops.setMinimum(1)
         self.ui.sp_limit_stops.setMaximum(200)
         if self.ui.sp_limit_stops.value() < 1:
@@ -386,11 +432,18 @@ class StopFinderController(QObject):
         self._fill_stops([])
         self._fill_departures([])
 
+        # optional: Start-Fokus ins Suchfeld
+        try:
+            self.ui.le_query.setFocus()
+        except Exception:
+            pass
+
     def _close_dialog(self):
         dlg = self.ui.le_query.window()
         if dlg:
             dlg.close()
 
+    # ---------- Thread helper ----------
     def _stop_thread(self):
         if self._thread is not None:
             try:
@@ -420,10 +473,11 @@ class StopFinderController(QObject):
 
         self._thread.start()
 
-    # -------- Search Stops --------
+    # ---------- Search Stops ----------
     def search_stops(self):
         q = self.ui.le_query.text().strip()
         if len(q) < 2:
+
             return
 
         limit = max(1, int(self.ui.sp_limit_stops.value()))
@@ -433,24 +487,31 @@ class StopFinderController(QObject):
         self._fill_stops([])
         self._fill_departures([])
 
+
         LOG.info("UI limits: stops=%s deps=%s", self.ui.sp_limit_stops.value(), self.ui.sp_limit_deps.value())
         self._run_worker(StopSearchWorker(q, limit=limit), self._on_stops, self._on_error)
 
     def _on_stops(self, stops: list):
         self._fill_stops(stops)
+
         if stops:
             self.ui.tbl_stops.selectRow(0)
             self._select_stop_row(0)
 
     def _fill_stops(self, stops: list):
-        self.ui.tbl_stops.setRowCount(0)
-        for s in stops:
-            r = self.ui.tbl_stops.rowCount()
-            self.ui.tbl_stops.insertRow(r)
-            item = QTableWidgetItem(s["name"])
-            item.setData(256, s["id"])  # Qt.UserRole
-            self.ui.tbl_stops.setItem(r, 0, item)
-        self.ui.tbl_stops.resizeColumnsToContents()
+        tbl = self.ui.tbl_stops
+        tbl.setUpdatesEnabled(False)
+        try:
+            tbl.setRowCount(0)
+            for s in stops:
+                r = tbl.rowCount()
+                tbl.insertRow(r)
+                item = QTableWidgetItem(s.get("name", ""))
+                item.setData(Qt.UserRole, s.get("id", ""))
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                tbl.setItem(r, 0, item)
+        finally:
+            tbl.setUpdatesEnabled(True)
 
     def _on_stop_clicked(self, row: int, col: int):
         self._select_stop_row(row)
@@ -460,7 +521,7 @@ class StopFinderController(QObject):
         if not it:
             return
 
-        stop_id = str(it.data(256) or "").strip()
+        stop_id = str(it.data(Qt.UserRole) or "").strip()
         stop_name = it.text().strip()
         if not stop_id:
             return
@@ -468,15 +529,15 @@ class StopFinderController(QObject):
         self._selected_stop = {"id": stop_id, "name": stop_name}
         self.fetch_departures()
 
-    # -------- Fetch Departures --------
+    # ---------- Fetch Departures ----------
     def fetch_departures(self):
         if not self._selected_stop:
             return
 
         limit = max(1, int(self.ui.sp_limit_deps.value()))
-
         self._selected_dep = None
         self._fill_departures([])
+
 
         self._run_worker(
             DeparturesWorker(self._selected_stop["id"], limit=limit),
@@ -490,16 +551,32 @@ class StopFinderController(QObject):
             self.ui.tbl_departures.selectRow(0)
             self._select_dep_row(0)
 
+        # kleiner Trick: nach dem Füllen einmal resize triggern (für ResizeToContents-Spalten)
+        try:
+            self.ui.tbl_departures.horizontalHeader().setMinimumSectionSize(20)
+        except Exception:
+            pass
+
     def _fill_departures(self, deps: list):
-        self.ui.tbl_departures.setRowCount(0)
-        for d in deps:
-            r = self.ui.tbl_departures.rowCount()
-            self.ui.tbl_departures.insertRow(r)
-            self.ui.tbl_departures.setItem(r, 0, QTableWidgetItem(d.get("time", "—")))
-            self.ui.tbl_departures.setItem(r, 1, QTableWidgetItem(d.get("line", "—")))
-            self.ui.tbl_departures.setItem(r, 2, QTableWidgetItem(d.get("direction", "—")))
-            self.ui.tbl_departures.setItem(r, 3, QTableWidgetItem(d.get("platform", "—")))
-        self.ui.tbl_departures.resizeColumnsToContents()
+        tbl = self.ui.tbl_departures
+        tbl.setUpdatesEnabled(False)
+        try:
+            tbl.setRowCount(0)
+            for d in deps:
+                r = tbl.rowCount()
+                tbl.insertRow(r)
+
+                def _mk(text: str):
+                    it = QTableWidgetItem(text if text is not None else "—")
+                    it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                    return it
+
+                tbl.setItem(r, 0, _mk(d.get("time", "—")))
+                tbl.setItem(r, 1, _mk(d.get("line", "—")))
+                tbl.setItem(r, 2, _mk(d.get("direction", "—")))
+                tbl.setItem(r, 3, _mk(d.get("platform", "—")))
+        finally:
+            tbl.setUpdatesEnabled(True)
 
     def _on_dep_clicked(self, row: int, col: int):
         self._select_dep_row(row)
@@ -518,7 +595,7 @@ class StopFinderController(QObject):
             "platform": p.text(),
         }
 
-    # -------- Apply --------
+    # ---------- Apply ----------
     def apply_selection(self):
         if not self._selected_stop:
             return
@@ -536,3 +613,4 @@ class StopFinderController(QObject):
 
     def _on_error(self, msg: str):
         LOG.error("UI error: %s", msg)
+

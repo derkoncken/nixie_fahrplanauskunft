@@ -2,7 +2,7 @@ import json
 
 # WICHTIG: haltestelle_1/2 sind bei dir QLabel -> kind="label"
 # spinBox_2/3/6 etc sind QSpinBox -> kind="spin"
-# wlan_name/wlan_ssid sind QLineEdit -> kind="lineedit"
+# wlan_name/wlan_password sind QLineEdit -> kind="lineedit"
 
 UI_MAP = {
     # 1. Abfahrt
@@ -23,7 +23,7 @@ UI_MAP = {
 
     # WLAN
     "wlan_name": ("wlan_name", "lineedit"),
-    "wlan_ssid": ("wlan_ssid", "lineedit"),
+    "wlan_password": ("wlan_password", "lineedit"),
 }
 
 # Optional: stop_id separat speichern (Property vom QLabel)
