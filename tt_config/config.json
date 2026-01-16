@@ -1,12 +1,16 @@
 {
-  "haltestelle_1": "",
-  "bahnsteig_1": 1,
+  "haltestelle_1": "DÃ¼sseldorf, Bremer StraÃe",
+  "line_no_1": "732",
+  "bahnsteig_1": "2",
   "abfahrten_1": 1,
-  "haltestelle_2": "",
-  "bahnsteig_2": 1,
+  "haltestelle_2": "DÃ¼sseldorf, DÃ¼sseldorf Hbf",
+  "line_no_2": "S6",
+  "bahnsteig_2": "14",
   "abfahrten_2": 1,
-  "alarm_abfahrt": 0,
-  "alarm_minuten": 1,
-  "wlan_name": "12345",
-  "wlan_ssid": "222"
+  "alarm_abfahrt": 1,
+  "alarm_minuten": 15,
+  "wlan_name": "1234",
+  "wlan_ssid": "123444",
+  "stop_id_1": "20019828",
+  "stop_id_2": "20018235"
 }

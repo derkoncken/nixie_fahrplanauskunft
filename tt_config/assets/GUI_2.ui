@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>400</width>
-    <height>574</height>
+    <width>580</width>
+    <height>661</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -39,7 +39,7 @@
   <widget class="QPushButton" name="btn_search">
    <property name="geometry">
     <rect>
-     <x>290</x>
+     <x>230</x>
      <y>50</y>
      <width>89</width>
      <height>25</height>
@@ -49,109 +49,43 @@
     <string>Suchen</string>
    </property>
   </widget>
-  <widget class="QSpinBox" name="sp_limit">
+  <widget class="QSpinBox" name="sp_limit_deps">
    <property name="geometry">
     <rect>
-     <x>70</x>
-     <y>80</y>
+     <x>530</x>
+     <y>50</y>
      <width>44</width>
      <height>26</height>
     </rect>
    </property>
-  </widget>
-  <widget class="QLabel" name="label_2">
-   <property name="geometry">
-    <rect>
-     <x>10</x>
-     <y>80</y>
-     <width>51</width>
-     <height>17</height>
-    </rect>
+   <property name="maximum">
+    <number>100</number>
    </property>
-   <property name="text">
-    <string>max.</string>
+   <property name="value">
+    <number>20</number>
    </property>
   </widget>
-  <widget class="QCheckBox" name="cb_only_stops">
-   <property name="geometry">
-    <rect>
-     <x>140</x>
-     <y>80</y>
-     <width>191</width>
-     <height>23</height>
-    </rect>
-   </property>
-   <property name="text">
-    <string>nur Haltestellen (stop)</string>
-   </property>
-  </widget>
-  <widget class="QTableWidget" name="tbl_results">
+  <widget class="QTableWidget" name="tbl_stops">
    <property name="geometry">
     <rect>
      <x>0</x>
-     <y>120</y>
-     <width>391</width>
-     <height>231</height>
+     <y>90</y>
+     <width>581</width>
+     <height>260</height>
     </rect>
    </property>
    <column>
     <property name="text">
-     <string>Name</string>
-    </property>
-   </column>
-   <column>
-    <property name="text">
-     <string>Typ</string>
-    </property>
-   </column>
-   <column>
-    <property name="text">
-     <string>Qualität</string>
-    </property>
-   </column>
-   <column>
-    <property name="text">
-     <string>Best</string>
-    </property>
-   </column>
-   <column>
-    <property name="text">
-     <string>ID</string>
+     <string>Haltestelle</string>
     </property>
    </column>
   </widget>
-  <widget class="QLabel" name="lbl_status">
+  <widget class="QPushButton" name="btn_apply">
    <property name="geometry">
     <rect>
-     <x>30</x>
-     <y>380</y>
-     <width>67</width>
-     <height>17</height>
-    </rect>
-   </property>
-   <property name="text">
-    <string>Bereit.</string>
-   </property>
-  </widget>
-  <widget class="QPushButton" name="btn_copy">
-   <property name="geometry">
-    <rect>
-     <x>20</x>
-     <y>470</y>
-     <width>89</width>
-     <height>25</height>
-    </rect>
-   </property>
-   <property name="text">
-    <string>ID kopieren</string>
-   </property>
-  </widget>
-  <widget class="QPushButton" name="btn_select">
-   <property name="geometry">
-    <rect>
-     <x>140</x>
-     <y>470</y>
-     <width>89</width>
+     <x>10</x>
+     <y>620</y>
+     <width>120</width>
      <height>25</height>
     </rect>
    </property>
@@ -162,14 +96,83 @@
   <widget class="QPushButton" name="btn_close">
    <property name="geometry">
     <rect>
-     <x>250</x>
-     <y>470</y>
-     <width>89</width>
+     <x>140</x>
+     <y>620</y>
+     <width>120</width>
      <height>25</height>
     </rect>
    </property>
    <property name="text">
     <string>Schließen</string>
+   </property>
+  </widget>
+  <widget class="QTableWidget" name="tbl_departures">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>350</y>
+     <width>581</width>
+     <height>260</height>
+    </rect>
+   </property>
+   <column>
+    <property name="text">
+     <string>Zeit</string>
+    </property>
+   </column>
+   <column>
+    <property name="text">
+     <string>Linie</string>
+    </property>
+   </column>
+   <column>
+    <property name="text">
+     <string>Richtung</string>
+    </property>
+   </column>
+   <column>
+    <property name="text">
+     <string>Bahnsteig</string>
+    </property>
+   </column>
+  </widget>
+  <widget class="QSpinBox" name="sp_limit_stops">
+   <property name="geometry">
+    <rect>
+     <x>530</x>
+     <y>20</y>
+     <width>44</width>
+     <height>26</height>
+    </rect>
+   </property>
+   <property name="value">
+    <number>10</number>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_3">
+   <property name="geometry">
+    <rect>
+     <x>360</x>
+     <y>30</y>
+     <width>141</width>
+     <height>20</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>Anzahl Haltestellen</string>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_4">
+   <property name="geometry">
+    <rect>
+     <x>360</x>
+     <y>50</y>
+     <width>141</width>
+     <height>20</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>Anzahl Abfahrten</string>
    </property>
   </widget>
  </widget>

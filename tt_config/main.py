@@ -13,26 +13,16 @@ from esp32_data_handler import upload_json_to_esp32, download_json_from_esp32
 from json_handler import save_ui_to_json, load_ui_from_json
 from serial.tools import list_ports
 
-from stop_finder import StopFinderController  # <-- NEU
+from stop_finder import StopFinderController  # wichtig
 
 
 ESPRESSIF_VID = 0x303A
 PORT = "/dev/ttyACM0"
 
 
-# Wird später gelöscht, nur für UI-Kompilierung
 def compile_ui(ui_path: Path, py_path: Path) -> None:
-    """
-    Compiles a Qt Designer .ui file into a Python file using pyuic via the current interpreter.
-    """
     subprocess.run(
-        [
-            sys.executable,
-            "-m", "PyQt5.uic.pyuic",
-            str(ui_path.name),
-            "-o",
-            str(py_path.name),
-        ],
+        [sys.executable, "-m", "PyQt5.uic.pyuic", str(ui_path.name), "-o", str(py_path.name)],
         cwd=str(ui_path.parent),
         check=True,
     )
@@ -43,84 +33,113 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.ui = Ui_Dialog()
         self.ui.setupUi(self)
-
-        # StopFinder Controller an Dialog-UI binden
         self.stopfinder = StopFinderController(self.ui, parent=self)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-
-        # UI setup
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
 
-        # Dialog-Handle (wichtig, sonst None / sofort zerstört)
         self.dialog = None
+        self._target_departure = 1  # 1 oder 2
 
-        # QAction -> Dialog öffnen
-        self.ui.stop_finder.triggered.connect(self.open_dialog)
+        # Theme state (NEU)
+        self._theme = "dark"  # oder "light" als Startwert
+        self._corner_shape = "sharp"
 
-        # Timer setup für Status an den Radiobuttons
+        # Buttons im UI
+        self.ui.choose_line_1.clicked.connect(lambda: self.open_dialog(target=1))
+        self.ui.choose_line_2.clicked.connect(lambda: self.open_dialog(target=2))
+
+        # Upload/Download/Reset
+        self.ui.upload_json.clicked.connect(self.on_upload_clicked)
+        self.ui.download_json.clicked.connect(self.on_download_clicked)
+        self.ui.reset_esp.clicked.connect(self.reset_esp32)
+
+        # Theme Toggle Button (NEU)
+        # Voraussetzung: im QtDesigner heißt der Button wirklich "switch_mode"
+        self.ui.switch_mode.triggered.connect(self.toggle_theme)
+
+        # Timer: ESP Status
         self.timer = QTimer(self)
-        self.timer.setInterval(1000)  # 1 Sekunde
+        self.timer.setInterval(1000)
         self.timer.timeout.connect(self.find_esp32_ports)
         self.ui.ping_blank.setVisible(False)
         self.timer.start()
 
-        # Button-Verbindungen
-        self.ui.upload_json.clicked.connect(self.send_json)
-        self.ui.download_json.clicked.connect(self.download_json)
+        # Theme initial setzen (NEU)
+        qdarktheme.setup_theme(self._theme, corner_shape=self._corner_shape)
 
-    # Functions triggered by UI actions
-    def send_json(self):
-        save_ui_to_json(self.ui)
-        upload_json_to_esp32("config.json")
-        self.reset_esp32()
+    # -------- Theme --------
+    def toggle_theme(self):
+        self._theme = "light" if self._theme == "dark" else "dark"
+        qdarktheme.setup_theme(self._theme, corner_shape=self._corner_shape)
+        self.ui.switch_mode.setText("Darkmode" if self._theme == "light" else "Lightmode")
 
-    def download_json(self):
-        download_json_from_esp32("config.json")
-        load_ui_from_json(self.ui)
-        self.reset_esp32()
+        # Optional: Plot-Widgets background switchen (wenn du welche hast)
+        # Beispiel:
+        # self.plot_widget.setBackground("k" if self._theme == "dark" else "w")
+
+    # -------- Upload/Download Flow --------
+    def on_upload_clicked(self):
+        save_ui_to_json(self.ui, "config.json")
+        # upload_json_to_esp32("config.json")
+        # self.reset_esp32()
+
+    def on_download_clicked(self):
+        # download_json_from_esp32("config.json", "config.json")
+        load_ui_from_json(self.ui, "config.json")
 
     def reset_esp32(self):
         subprocess.run(["mpremote", "connect", PORT, "reset"], check=True)
 
-    def open_dialog(self):
+    # -------- StopFinder Dialog --------
+    def open_dialog(self, target: int):
+        self._target_departure = 1 if target != 2 else 2
+
         if self.dialog is None:
             self.dialog = SettingsDialog(self)
+            self.dialog.stopfinder.selection_applied.connect(self.apply_selection_to_main)
 
-            # Wenn im Dialog eine stop_id ausgewählt wird -> ins Mainwindow übernehmen
-            self.dialog.stopfinder.stop_selected.connect(self.apply_stop_id_to_main)
-
-        self.dialog.show()  # nicht-modal
+        self.dialog.show()
         self.dialog.raise_()
         self.dialog.activateWindow()
 
-    def apply_stop_id_to_main(self, stop_id: str, name: str):
-        """
-        Speichert die ausgewählte stop_id in das Feld 'haltestelle_1' (MainWindow UI).
-        Optional kannst du auch den Namen irgendwo anzeigen – hier nur die ID.
-        """
-        # haltestelle_1 muss ein Widget mit setText() sein (z.B. QLineEdit)
-        self.ui.haltestelle_1.setText(stop_id)
+    def apply_selection_to_main(self, data: dict):
+        stop_id = data.get("stop_id", "")
+        stop_name = data.get("stop_name", "")
+        platform = data.get("platform", "")
+        line = data.get("line", "")
 
-        # Optional: Dialog schließen nach Übernahme
-        # if self.dialog is not None:
-        #     self.dialog.close()
+        if self._target_departure == 1:
+            self.ui.haltestelle_1.setText(stop_name)
+            self.ui.line_no_1.setText(line)
+            self.ui.bahnsteig_1.setText(platform)
+            self.ui.haltestelle_1.setProperty("stop_id", stop_id)
+        else:
+            self.ui.haltestelle_2.setText(stop_name)
+            self.ui.line_no_2.setText(line)
+            self.ui.bahnsteig_2.setText(platform)
+            self.ui.haltestelle_2.setText(stop_name)
+            self.ui.bahnsteig_2.setText(platform)
+            self.ui.haltestelle_2.setProperty("stop_id", stop_id)
 
-    # Status-Funktionen
+    # -------- ESP Status --------
     def find_esp32_ports(self):
-        ports = []
-        for p in list_ports.comports():
-            if p.vid == ESPRESSIF_VID:
-                ports.append(p.device)
+        ports = [p.device for p in list_ports.comports() if p.vid == ESPRESSIF_VID]
 
         if ports:
             self.toggle_radiobuttons()
+            self.ui.upload_json.setEnabled(True)
+            self.ui.download_json.setEnabled(True)
+            self.ui.reset_esp.setEnabled(True)
         else:
             self.ui.ping_blank.setChecked(True)
+            self.ui.upload_json.setEnabled(False)
+            self.ui.download_json.setEnabled(False)
+            self.ui.reset_esp.setEnabled(False)
 
     def toggle_radiobuttons(self):
         if self.ui.ping.isChecked():
@@ -130,7 +149,6 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
-    # Optional: UI vor dem Start kompilieren
     ui_file = Path("assets/GUI.ui")
     py_file = Path("assets/GUI.py")
     if ui_file.exists():
@@ -143,12 +161,8 @@ def main() -> None:
 
     app = QApplication(sys.argv)
 
-    # Theme setzen
-    qdarktheme.setup_theme(corner_shape="sharp")
-
     window = MainWindow()
     window.show()
-
     sys.exit(app.exec_())
 
 
