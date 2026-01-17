@@ -1,182 +1,30 @@
 # main.py — VRR/EFA -> Waveshare 2.9" E-Ink Anzeige (Querformat, Rotation 90°)
 import gc
 import time
-import sys
 import micropython
-import socket
 import _thread
-from machine import Pin, PWM
 
-BTN_GPIO = 43
-LED_GPIO = 44
-BUZ_GPIO = 6
+from display_driver import EPD29V2, rotated_pixel_90
+from helper import normalize_text
 
-from get_departures import get_data, ensure_wifi
-from display_driver import EPD29V2, rotated_pixel_90, print_text
-from helper import split_string, normalize_text
+from app_config import (
+    REFRESH_S,
+    ENABLE_FULL_REFRESH,
+    PARTIALS_PER_FULL,
+    BTN_GPIO, LED_GPIO, BUZ_GPIO,
+    read_runtime_config,
+)
+from render_ui import (
+    render_loading_screen, render_error_fullscreen, redraw_full
+)
+from display_updates import (
+    update_time_and_countdown_partial,
+    make_full_state, make_time_state
+)
+from alarm_io import AlarmIO
+from fetch_thread import start_fetch_thread
 
-WIFI_SSID = "ich_mag_kein_gurkenwasser"
-WIFI_PASS = "gurkenhuette187!"
 
-# 1) 701
-STOP_ID_701  = "20018098"
-LINE_NO_701  = "701"
-PLATFORM_701 = "4"
-LIMIT_701    = "10"
-
-# 2) S6
-STOP_ID_S6   = "20018235"
-LINE_NO_S6   = "S6"
-PLATFORM_S6  = "11"
-LIMIT_S6     = "70"
-
-REFRESH_S = 10
-
-# ---------- Alarm/LED/Buzzer ----------
-ALARM_THRESHOLD_MIN = 200      # Alarm wird ausgelöst wenn Countdown < ALARM_THRESHOLD_MIN Minuten
-
-alarm_armed = False          # scharfgestellt?
-alarm_triggered = False      # <ALARM_THRESHOLD_MIN schon ausgelöst?
-last_cd_701 = None
-
-blink_enabled = False
-blink_state = 0
-blink_last_ms = 0
-BLINK_INTERVAL_MS = 250
-
-BEEP_MS = 140
-BEEP_FREQ = 880
-BEEP_DUTY = 5000
-
-# ---------- Pins ----------
-button = Pin(BTN_GPIO, Pin.IN)  # extern Pull-Down: gedrückt = 1
-led = Pin(LED_GPIO, Pin.OUT)
-led.value(0)
-
-pwm = PWM(Pin(BUZ_GPIO))
-pwm.freq(BEEP_FREQ)
-pwm.duty_u16(0)  # aus
-
-# ---------- Button-IRQ -> nur Flag setzen (und LED sofort an als Feedback) ----------
-_DEBOUNCE_MS = 200
-_last_irq_ms = 0
-_arm_request = False
-
-def _btn_irq(pin):
-    global _last_irq_ms, _arm_request
-    now = time.ticks_ms()
-    if time.ticks_diff(now, _last_irq_ms) < _DEBOUNCE_MS:
-        return
-    _last_irq_ms = now
-
-    if pin.value() == 1:
-        _arm_request = True
-        # sofortiges Feedback (kurz & sicher)
-        led.value(1)
-
-button.irq(trigger=Pin.IRQ_RISING, handler=_btn_irq)
-
-def _beep_once():
-    pwm.freq(BEEP_FREQ)
-    pwm.duty_u16(BEEP_DUTY)
-    time.sleep_ms(BEEP_MS)
-    pwm.duty_u16(0)
-    time.sleep_ms(BEEP_MS)
-    pwm.duty_u16(BEEP_DUTY)
-    time.sleep_ms(BEEP_MS)
-    pwm.duty_u16(0)
-
-def _disarm_alarm():
-    """Alarm vollständig aus + LED aus."""
-    global alarm_armed, alarm_triggered, blink_enabled, blink_state
-    alarm_armed = False
-    alarm_triggered = False
-    blink_enabled = False
-    blink_state = 0
-    led.value(0)
-
-def _arm_alarm():
-    """Alarm scharf + LED an (nicht blinkend)."""
-    global alarm_armed, alarm_triggered, blink_enabled, blink_state, blink_last_ms, last_cd_701
-    alarm_armed = True
-    alarm_triggered = False
-    blink_enabled = False
-    blink_state = 0
-    blink_last_ms = time.ticks_ms()
-    last_cd_701 = None
-    led.value(1)
-
-def _set_led_logic():
-    """LED je nach Zustand setzen (dauerhaft / blink / aus)."""
-    global blink_state, blink_last_ms
-
-    if not alarm_armed:
-        led.value(0)
-        return
-
-    if not blink_enabled:
-        led.value(1)
-        return
-
-    # blink
-    now = time.ticks_ms()
-    if time.ticks_diff(now, blink_last_ms) >= BLINK_INTERVAL_MS:
-        blink_last_ms = now
-        blink_state ^= 1
-        led.value(blink_state)
-
-# ---------- Shared State für Thread (Main liest nur, Worker schreibt) ----------
-data_lock = _thread.allocate_lock()
-shared = {
-    "r701": None,
-    "rs6": None,
-    "err": None,
-    "seq": 0,   # hochzählen wenn neue Daten da sind
-}
-
-def _should_beep_after_fetch():
-    """Nur piepen, wenn Alarm bereits getriggert ist (blink läuft)."""
-    # alarm_triggered ist global; lesen ist ok
-    return alarm_triggered
-
-def fetch_worker():
-    """Läuft im Hintergrund: WLAN sicherstellen + get_data() ausführen.
-       NICHTS am Display machen (nur Daten holen)!"""
-    global shared
-
-    while True:
-        r701 = None
-        rs6 = None
-        err = None
-
-        try:
-            ensure_wifi(WIFI_SSID, WIFI_PASS, tries=1)
-
-            print("Get Data...")
-            r701 = get_data(STOP_ID_701, LIMIT_701, LINE_NO_701, PLATFORM_701)
-            if _should_beep_after_fetch():
-                _beep_once()  # <- nur wenn Alarm getriggert ist
-
-            rs6  = get_data(STOP_ID_S6,  LIMIT_S6,  LINE_NO_S6,  PLATFORM_S6)
-            if _should_beep_after_fetch():
-                _beep_once()  # <- nur wenn Alarm getriggert ist
-
-            print("Found Data!")
-        except Exception as e:
-            err = repr(e)
-
-        data_lock.acquire()
-        try:
-            shared["r701"] = r701
-            shared["rs6"] = rs6
-            shared["err"] = err
-            shared["seq"] += 1
-        finally:
-            data_lock.release()
-
-        time.sleep(REFRESH_S)
-
-# ---------- Render Helpers ----------
 def log_mem(tag=""):
     try:
         gc.collect()
@@ -185,154 +33,140 @@ def log_mem(tag=""):
     except Exception as e:
         print("[MEM] mem_info failed:", repr(e))
 
-def render_card(epd, pix, line_no, countdown, direction, planned, real, delay, y_offset):
-    print_text(epd.fb, pix, line_no, 0, 5 + y_offset, size=3, bold=True)
-
-    direction = normalize_text(direction)
-    s1, s2 = split_string(direction, 23)
-    print_text(epd.fb, pix, s1, 100, 5 + y_offset, size=1, bold=False)
-    if s2:
-        print_text(epd.fb, pix, s2, 100, 20 + y_offset, size=1, bold=False)
-
-    print_text(epd.fb, pix, real, 0, 35 + y_offset, size=2, bold=False)
-    print_text(epd.fb, pix, "-> {} min".format(countdown), 100, 35 + y_offset, size=2, bold=False)
-
-def render_none_card(epd, pix, line_no, msg, y_offset):
-    print_text(epd.fb, pix, line_no, 0, 5 + y_offset, size=3, bold=True)
-    print_text(epd.fb, pix, msg, 100, 12 + y_offset, size=1, bold=True)
-
-def render_error_fullscreen(epd, pix, msg="Fehler"):
-    epd.fb.fill(1)
-    print_text(epd.fb, pix, msg, 10, 10, size=2, bold=True)
-    epd.display()
-
-def render_info_fullscreen(epd, pix, msg="Start..."):
-    epd.fb.fill(1)
-    print_text(epd.fb, pix, msg, 10, 10, size=2, bold=True)
-    epd.display()
-
-def make_state(tag, result):
-    if result is None:
-        return tag + "|NONE"
-    countdown, direction, planned, real, delay = result
-    direction_norm = normalize_text(direction)
-    return "{}|{}|{}|{}|{}".format(tag, countdown, direction_norm, real, delay)
-
-def draw_hline(pix, x0, x1, y, color=0):
-    for x in range(x0, x1 + 1):
-        pix(x, y, color)
 
 def main():
-    global alarm_armed, alarm_triggered, last_cd_701
-    global blink_enabled, blink_state, blink_last_ms, _arm_request
+    cfg = read_runtime_config()
 
+    STOP_ID_1 = cfg["STOP_ID_1"]; LINE_NO_1 = cfg["LINE_NO_1"]; PLATFORM_1 = cfg["PLATFORM_1"]; LIMIT_1 = cfg["LIMIT_1"]
+    STOP_ID_2 = cfg["STOP_ID_2"]; LINE_NO_2 = cfg["LINE_NO_2"]; PLATFORM_2 = cfg["PLATFORM_2"]; LIMIT_2 = cfg["LIMIT_2"]
+    WIFI_SSID = cfg["WIFI_SSID"]; WIFI_PASS = cfg["WIFI_PASS"]
+    ALARM_SOURCE = cfg["ALARM_SOURCE"]; ALARM_THRESHOLD_MIN = cfg["ALARM_THRESHOLD_MIN"]
+
+    # Display
     epd = EPD29V2()
     pix = rotated_pixel_90(epd.fb, epd.W, epd.H)
 
+    # IO/Alarm
+    aio = AlarmIO(BTN_GPIO, LED_GPIO, BUZ_GPIO)
+
     print("\n=== START ===")
+    print("[CFG] line1={}, stop1={}, pf1={}, lim1={}".format(LINE_NO_1, STOP_ID_1, PLATFORM_1, LIMIT_1))
+    print("[CFG] line2={}, stop2={}, pf2={}, lim2={}".format(LINE_NO_2, STOP_ID_2, PLATFORM_2, LIMIT_2))
+    print("[CFG] alarm_source={}, alarm_threshold={}min".format(ALARM_SOURCE, ALARM_THRESHOLD_MIN))
+    print("[POLICY] ENABLE_FULL_REFRESH={}, PARTIALS_PER_FULL={}".format(ENABLE_FULL_REFRESH, PARTIALS_PER_FULL))
     log_mem("boot")
 
-    # Initiale Anzeige (damit direkt was da ist)
-    render_info_fullscreen(epd, pix, "Starte...")
+    # Startsequenz: immer Full (sauberer Start + RAM sync)
+    render_loading_screen(epd, pix, LINE_NO_1, LINE_NO_2)
 
-    # Fetch-Thread starten (nur einmal!)
-    _thread.start_new_thread(fetch_worker, ())
+    # Shared State für Fetch-Thread
+    data_lock = _thread.allocate_lock()
+    shared = {"r1": None, "r2": None, "err": None, "seq": 0, "ready": False}
+
+    start_fetch_thread(
+        shared, data_lock,
+        WIFI_SSID, WIFI_PASS,
+        STOP_ID_1, LIMIT_1, LINE_NO_1, PLATFORM_1,
+        STOP_ID_2, LIMIT_2, LINE_NO_2, PLATFORM_2,
+        REFRESH_S
+    )
 
     last_seq = -1
-    last_state = None
-    had_any_data = False
+    last_full_state = None
+    last_time_state = None
+
+    # zählt nur Partial-Updates (für optionales Full)
+    partial_since_full = 0
 
     while True:
         gc.collect()
 
-        # Button-Request verarbeiten (Alarm togglen)
-        if _arm_request:
-            _arm_request = False
-
-            if alarm_armed:
-                _disarm_alarm()
+        # Button -> Alarm togglen
+        if aio.arm_request:
+            aio.arm_request = False
+            if aio.alarm_armed:
+                aio.disarm()
                 print("[ALARM] entschaerft")
             else:
-                _arm_alarm()
+                aio.arm()
                 print("[ALARM] scharf (Schwelle: <{} min)".format(ALARM_THRESHOLD_MIN))
 
-        # LED/Alarm immer flüssig updaten (unabhängig vom Netzwerk)
-        _set_led_logic()
+        # LED tick
+        aio.tick_led()
 
-        # Daten schnell aus shared kopieren
+        # Daten holen
         data_lock.acquire()
         try:
             seq = shared["seq"]
-            r_701 = shared["r701"]
-            r_s6  = shared["rs6"]
-            err   = shared["err"]
+            r1 = shared["r1"]
+            r2 = shared["r2"]
+            err = shared["err"]
+            ready = shared["ready"]
         finally:
             data_lock.release()
 
-        # Nur bei neuen Daten rendern / Alarm-Logik prüfen
+        if not ready:
+            time.sleep_ms(20)
+            continue
+
         if seq != last_seq:
             last_seq = seq
 
             if err is not None:
-                state = "ERR|" + err
-                if state != last_state:
+                state_err = "ERR|" + err
+                if state_err != last_full_state:
                     render_error_fullscreen(epd, pix, "WLAN/Request Fehler")
-                    last_state = state
+                    last_full_state = state_err
+                    last_time_state = None
+                    partial_since_full = 0
             else:
-                had_any_data = True
+                # Alarm-Logik (Display unabhängig)
+                aio.apply_alarm_logic(r1, r2, ALARM_SOURCE, ALARM_THRESHOLD_MIN)
+                aio.tick_led()
 
-                # --- Alarm-Logik für 701 ---
-                cd_701 = r_701[0] if r_701 is not None else None
+                # States
+                full_state = (
+                    make_full_state(LINE_NO_1, r1, normalize_text) +
+                    "||" +
+                    make_full_state(LINE_NO_2, r2, normalize_text)
+                )
+                time_state = (
+                    make_time_state(LINE_NO_1, r1) +
+                    "||" +
+                    make_time_state(LINE_NO_2, r2)
+                )
 
-                if alarm_armed:
-                    # Trigger wenn < ALARM_THRESHOLD_MIN Minuten
-                    if (cd_701 is not None) and (cd_701 < ALARM_THRESHOLD_MIN) and (not alarm_triggered):
-                        alarm_triggered = True
-                        blink_enabled = True
-                        blink_state = 1
-                        blink_last_ms = time.ticks_ms()
-                        print("[ALARM] 701 <{}min -> beep + blink".format(ALARM_THRESHOLD_MIN))
-                        _beep_once()
+                # ---- Änderung: Layout/Content-Änderung => Full ist stabilitätskritisch ----
+                layout_changed = (full_state != last_full_state)
 
-                    # "Zug abgefahren": Countdown geht wieder hoch (und ist wieder >= ALARM_THRESHOLD_MIN)
-                    if alarm_triggered:
-                        if cd_701 is None:
-                            print("[ALARM] 701 weg -> Alarm aus")
-                            _disarm_alarm()
-                        elif (last_cd_701 is not None) and (cd_701 > last_cd_701) and (cd_701 >= ALARM_THRESHOLD_MIN):
-                            print("[ALARM] countdown wieder hoch -> Alarm aus")
-                            _disarm_alarm()
+                # 1) Layout/Content geändert -> Full immer (für Stabilität)
+                if layout_changed:
+                    redraw_full(epd, pix, LINE_NO_1, LINE_NO_2, r1, r2)
+                    last_full_state = full_state
+                    last_time_state = time_state
+                    partial_since_full = 0
 
-                last_cd_701 = cd_701
-                _set_led_logic()
-                # --- Ende Alarm-Logik ---
+                # 2) Nur Zeit/Countdown geändert -> immer Partial (deine Regel)
+                elif time_state != last_time_state:
+                    if r1 is not None:
+                        cd, direction, planned, real, delay = r1
+                        update_time_and_countdown_partial(epd, pix, y_offset=5, real=real, countdown=cd)
+                    if r2 is not None:
+                        cd, direction, planned, real, delay = r2
+                        update_time_and_countdown_partial(epd, pix, y_offset=70, real=real, countdown=cd)
 
-                state = make_state("701", r_701) + "||" + make_state("S6", r_s6)
+                    last_time_state = time_state
+                    partial_since_full += 1
 
-                if state != last_state:
-                    epd.fb.fill(1)
-                    draw_hline(pix, 0, 295, 65, color=0)
+                    # Optionaler Hygiene-Full nach N Partials (nur wenn global erlaubt)
+                    if ENABLE_FULL_REFRESH and PARTIALS_PER_FULL and PARTIALS_PER_FULL > 0:
+                        if partial_since_full >= PARTIALS_PER_FULL:
+                            redraw_full(epd, pix, LINE_NO_1, LINE_NO_2, r1, r2)
+                            partial_since_full = 0
+                            last_full_state = full_state
+                            last_time_state = time_state
 
-                    if r_701 is None:
-                        render_none_card(epd, pix, LINE_NO_701, "Keine Abfahrt", y_offset=5)
-                    else:
-                        cd, direction, planned, real, delay = r_701
-                        render_card(epd, pix, LINE_NO_701, cd, direction, planned, real, delay, y_offset=5)
-
-                    if r_s6 is None:
-                        render_none_card(epd, pix, LINE_NO_S6, "Keine Abfahrt", y_offset=70)
-                    else:
-                        cd, direction, planned, real, delay = r_s6
-                        render_card(epd, pix, LINE_NO_S6, cd, direction, planned, real, delay, y_offset=70)
-
-                    epd.display()
-                    last_state = state
-
-        # Falls Thread noch keine Daten geliefert hat, aber kein Fehler kam:
-        if (not had_any_data) and (last_state is None) and (seq == 0):
-            pass
-
-        # Kurzer Sleep -> Button/LED super responsiv
         time.sleep_ms(20)
+
 
 main()
