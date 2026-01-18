@@ -8,7 +8,7 @@ REFRESH_S = 5
 
 # --- Full/Partial Policy ---
 # Full-Refresh im Betrieb grundsätzlich erlauben?
-ENABLE_FULL_REFRESH = False   # <-- True/False (Startsequenz macht immer Full)
+ENABLE_FULL_REFRESH = True   # <-- True/False (Startsequenz macht immer Full)
 
 # Nach wie vielen Partial-Updates soll ein Full erfolgen?
 # 0 oder None => nie Full im Betrieb

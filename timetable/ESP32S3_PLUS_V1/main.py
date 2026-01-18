@@ -4,8 +4,10 @@ import time
 import micropython
 import _thread
 
+import layout as L
+
 from display_driver import EPD29V2, rotated_pixel_90
-from helper import normalize_text
+from display_updates import update_slot_partial
 
 from app_config import (
     REFRESH_S,
@@ -17,10 +19,7 @@ from app_config import (
 from render_ui import (
     render_loading_screen, render_error_fullscreen, redraw_full
 )
-from display_updates import (
-    update_time_and_countdown_partial,
-    make_full_state, make_time_state
-)
+
 from alarm_io import AlarmIO
 from fetch_thread import start_fetch_thread
 
@@ -32,6 +31,30 @@ def log_mem(tag=""):
         micropython.mem_info()
     except Exception as e:
         print("[MEM] mem_info failed:", repr(e))
+
+
+# --- Tuple-States (weniger Heap/Fragmentierung als String-States) ---
+def state_full(tag, r):
+    """
+    Alles, was NICHT nur Zeit/Countdown ist.
+    In deinem UI wird zwar nur direction angezeigt, aber wir lassen planned/delay drin,
+    damit Full- und Partial-Strategie bei Bedarf weiterhin korrekt entscheiden können.
+    """
+    if r is None:
+        return (tag, None)
+    cd, direction, planned, real, delay = r
+    # Wichtig: direction roh vergleichen (normalize passiert beim Zeichnen)
+    return (tag, direction, delay, planned)
+
+
+def state_time(tag, r):
+    """
+    Nur die dynamischen Felder (real + countdown).
+    """
+    if r is None:
+        return (tag, None)
+    cd, direction, planned, real, delay = r
+    return (tag, real, cd)
 
 
 def main():
@@ -72,10 +95,11 @@ def main():
     )
 
     last_seq = -1
+
     last_full_state = None
     last_time_state = None
+    last_err_state = None
 
-    # zählt nur Partial-Updates (für optionales Full)
     partial_since_full = 0
 
     while True:
@@ -94,7 +118,7 @@ def main():
         # LED tick
         aio.tick_led()
 
-        # Daten holen
+        # Daten holen (thread-safe)
         data_lock.acquire()
         try:
             seq = shared["seq"]
@@ -112,53 +136,80 @@ def main():
         if seq != last_seq:
             last_seq = seq
 
+            # --- Fehlerfall ---
             if err is not None:
-                state_err = "ERR|" + err
-                if state_err != last_full_state:
+                err_state = ("ERR", err)
+                if err_state != last_err_state:
                     render_error_fullscreen(epd, pix, "WLAN/Request Fehler")
-                    last_full_state = state_err
+                    last_err_state = err_state
+
+                    # States resetten, damit nach Fehler sicher neu gerendert wird
+                    last_full_state = None
                     last_time_state = None
                     partial_since_full = 0
+
+            # --- Normalfall ---
             else:
+                last_err_state = None
+
                 # Alarm-Logik (Display unabhängig)
                 aio.apply_alarm_logic(r1, r2, ALARM_SOURCE, ALARM_THRESHOLD_MIN)
                 aio.tick_led()
 
-                # States
-                full_state = (
-                    make_full_state(LINE_NO_1, r1, normalize_text) +
-                    "||" +
-                    make_full_state(LINE_NO_2, r2, normalize_text)
-                )
-                time_state = (
-                    make_time_state(LINE_NO_1, r1) +
-                    "||" +
-                    make_time_state(LINE_NO_2, r2)
-                )
+                # States (Tuple)
+                full_state = (state_full(LINE_NO_1, r1), state_full(LINE_NO_2, r2))
+                time_state = (state_time(LINE_NO_1, r1), state_time(LINE_NO_2, r2))
 
-                # ---- Änderung: Layout/Content-Änderung => Full ist stabilitätskritisch ----
-                layout_changed = (full_state != last_full_state)
+                anything_changed = (full_state != last_full_state) or (time_state != last_time_state)
 
-                # 1) Layout/Content geändert -> Full immer (für Stabilität)
-                if layout_changed:
-                    redraw_full(epd, pix, LINE_NO_1, LINE_NO_2, r1, r2)
-                    last_full_state = full_state
-                    last_time_state = time_state
-                    partial_since_full = 0
-
-                # 2) Nur Zeit/Countdown geändert -> immer Partial (deine Regel)
-                elif time_state != last_time_state:
-                    if r1 is not None:
+                if anything_changed:
+                    # Slot 1: Partial Update
+                    if r1 is None:
+                        update_slot_partial(
+                            epd, pix,
+                            line_no=LINE_NO_1,
+                            countdown=None,
+                            direction="Keine Abfahrt",
+                            real="—",
+                            y_offset=L.SLOT1_Y
+                        )
+                    else:
                         cd, direction, planned, real, delay = r1
-                        update_time_and_countdown_partial(epd, pix, y_offset=5, real=real, countdown=cd)
-                    if r2 is not None:
-                        cd, direction, planned, real, delay = r2
-                        update_time_and_countdown_partial(epd, pix, y_offset=70, real=real, countdown=cd)
+                        update_slot_partial(
+                            epd, pix,
+                            line_no=LINE_NO_1,
+                            countdown=cd,
+                            direction=direction,
+                            real=real,
+                            y_offset=L.SLOT1_Y
+                        )
 
+                    # Slot 2: Partial Update
+                    if r2 is None:
+                        update_slot_partial(
+                            epd, pix,
+                            line_no=LINE_NO_2,
+                            countdown=None,
+                            direction="Keine Abfahrt",
+                            real="—",
+                            y_offset=L.SLOT2_Y
+                        )
+                    else:
+                        cd, direction, planned, real, delay = r2
+                        update_slot_partial(
+                            epd, pix,
+                            line_no=LINE_NO_2,
+                            countdown=cd,
+                            direction=direction,
+                            real=real,
+                            y_offset=L.SLOT2_Y
+                        )
+
+                    last_full_state = full_state
                     last_time_state = time_state
                     partial_since_full += 1
 
-                    # Optionaler Hygiene-Full nach N Partials (nur wenn global erlaubt)
+                    # Hygiene-Full nach N Partials (falls erlaubt)
                     if ENABLE_FULL_REFRESH and PARTIALS_PER_FULL and PARTIALS_PER_FULL > 0:
                         if partial_since_full >= PARTIALS_PER_FULL:
                             redraw_full(epd, pix, LINE_NO_1, LINE_NO_2, r1, r2)
