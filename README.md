@@ -1,1 +1,0 @@
-# nixie_fahrplanauskunft
